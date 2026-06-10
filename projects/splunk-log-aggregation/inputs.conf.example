@@ -1,0 +1,9 @@
+# example Splunk input configuration
+[monitor:///var/log/syslog]
+disabled = 0
+index = linux_logs
+sourcetype = syslog
+
+# NOTE: Replace with your actual indexer IP
+# [tcpout]
+# defaultGroup = default-autolb-group
