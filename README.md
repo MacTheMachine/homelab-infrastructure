@@ -16,7 +16,7 @@ This lab environment is designed to provide hands-on experience with virtualizat
 - [ ] **Home Lab Hardening:** Security best practices implemented in the home environment.
 
 ### Documentation
-- [Lancache-Dashboard Troubleshooting Guide](./LanCache_Dashboard_Troubleshooting.md)
+- [Lancache-Dashboard Troubleshooting Guide](docs/LanCache_Dashboard_Troubleshooting.md)
 
 ### Notebook & Infrastructure Case Studies
 * [Case Study: Resolving Technitium DNS API Storms & Decoupling LanCache Ingestion](docs/technitium-lancache-integration.md)
