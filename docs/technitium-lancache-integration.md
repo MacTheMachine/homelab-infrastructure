@@ -1,68 +1,91 @@
-## Architectural Log: Decoupling LanCache & Technitium DNS (Resolving the API Log Storm)
+# LanCache + Technitium DNS Native Integration
 
-### 🔴 The Incident & Problem Statement
-Our automated gaming domain orchestration script (`push_cache_domains.py`) running on the LanCache VM (`192.168.1.132`) was task-scheduled to inject massive batches of CDN domains into our core Technitium DNS Server (`192.168.1.251`). 
+This document details the configuration used to seamlessly route game CDN traffic (Steam, Battle.net, Xbox, etc.) to a local LanCache server using Technitium DNS.
 
-Following upstream application updates, a strict schema mismatch occurred. The script was pushing malformed requests to Technitium's `/api/zones/records/add` endpoint missing mandatory JSON parameters (specifically key string `type` and `ipAddress`), throwing continuous `.NET` stack traces: `DnsServerCore.DnsWebServiceException: Parameter 'type' missing.`
+By leveraging Technitium's native Block List engine rather than API calls or legacy forwarding apps, we achieve a highly stable, zero-overhead intercept layer.
 
-**Impact:**
-- **API Bombing:** Unthrottled request loops bombarded the web engine dozens of times per second.
-- **Log Explosions:** Flat-text application logs rapidly ballooned to hundreds of megabytes/gigabytes.
-- **UI Denial of Service:** When attempting to render system logs via the Web UI, memory exhaustion occurred, triggering a hard browser crash and generic `HTTP 500 Internal Server Error` exceptions.
+## 🏗️ Architecture Overview
+
+* **Primary DNS Server:** Technitium DNS (`192.168.1.251`)
+* **LanCache Server:** Ubuntu VM / Docker Monolithic (`192.168.1.132`)
+* **Mechanism:** The LanCache server generates a flat-file of domain rules and hosts them locally via HTTP. Technitium periodically fetches this file and applies it to its native blocking engine to route traffic to the cache.
+
+## ⚠️ The Problem with Legacy API Methods
+
+Previously, automation scripts attempted to use the Technitium `/api/zones/records/add` endpoint to inject thousands of game domains individually.
+
+* **The API Bomb:** Rapid-fire API calls can cause the Technitium web service to throttle, generate massive flat-file error logs, and eventually crash the Web UI with `Internal Server Error 500`.
+* **Formatting Clashes:** Legacy apps like "Advanced Forwarding" expect strict AdGuard syntax and will crash (`invalid character [61]`) when encountering standard Dnsmasq format (`address=/domain/ip`).
+
+## 🛠️ The Solution: Native Blocklist Overrides
+
+Technitium's native Blocking engine handles Dnsmasq-formatted wildcard strings natively. By feeding it a single URL containing all rules, we eliminate API overhead entirely.
+
+### Step 1: Generate the Ruleset
+
+On the LanCache server (`192.168.1.132`), use a Python script to compile the `uklans/cache-domains` repository into a single flat text file formatted for Dnsmasq.
+
+Example output format (`technitium_lancache_rules.txt`):
+
+```text
+address=/steamcontent.com/192.168.1.132
+address=/assets2.xboxlive.com/192.168.1.132
+address=/blizzard.com/192.168.1.132
+
+```
+
+### Step 2: Serve the File Locally over HTTP
+
+Technitium needs a network path to ingest the text file. Spin up a lightweight web server in the directory containing your output file.
+
+Using a background Python HTTP server (Port 8000):
+
+```bash
+# Navigate to the directory containing technitium_lancache_rules.txt
+cd /path/to/your/dns-automation
+
+# Start a simple HTTP server in the background
+nohup python3 -m http.server 8000 &
+
+```
+
+*Note: You can verify this is working by visiting `http://192.168.1.132:8000/technitium_lancache_rules.txt` in a web browser.*
+
+### Step 3: Configure Technitium DNS
+
+Instruct Technitium to pull this file and use it to hijack the routing.
+
+1. Open the Technitium Web UI (`http://192.168.1.251:5380`).
+2. Navigate to **Settings > Block Lists**.
+3. Scroll down to **Allow / Block List URLs** and click **Add**.
+4. Configure the entry:
+* **URL:** `http://192.168.1.132:8000/technitium_lancache_rules.txt`
+* **List Type:** `Block List / Overrides`
+
+
+5. Click **Save** and then click **Update Now** to force an immediate pull.
+
+## ✅ Verification
+
+Flush the DNS cache on your client machine and run a lookup against a known CDN domain:
+
+```cmd
+C:\> ipconfig /flushdns
+C:\> nslookup assets2.xboxlive.com
+
+```
+
+**Expected Result:**
+
+```text
+Server:  technitium.local
+Address:  192.168.1.251
+
+Name:    assets2.xboxlive.com
+Address:  192.168.1.132
+
+```
+
+If the IP resolves to your LanCache server (`.132`) instead of the public internet, the override is successfully engaged.
 
 ---
-
-### 🛠️ The Architecture Resolution: Local Flat-File Synchronization Engine
-Rather than merely patching the Python dict structure—which preserves a fragile, high-overhead API dependency that risks future throttling or timeouts—we cleanly decoupled the network fabric mapping entirely. 
-
-
-```
-
-[Old Flow]  LanCache VM ──(Thousands of Brittle API Calls)──> Technitium DB (Crash/Storm)
-
-[New Flow]  LanCache VM ──(Python Compiler)──> Flat txt ──(HTTP Local Sync)──> Technitium Allowed Lists
-
-```
-
-#### Step 1: Script Structural Realignment
-The Python compilation script on the LanCache VM was re-engineered. Instead of programmatically pushing payloads across the subnet boundary, it scans the localized `uklans/cache-domains` directory tree, sanitizes comments, and strips out structural host formatting into a lightweight, unified flat-text file matching Technitium wildcard rules:
-
-```python
-# Generated by compiled push_cache_domains.py on LanCache workspace
-address=/[steamcontent.com/192.168.1.132](https://steamcontent.com/192.168.1.132)
-address=/[blizzard.com/192.168.1.132](https://blizzard.com/192.168.1.132)
-address=/[epicgames.com/192.168.1.132](https://epicgames.com/192.168.1.132)
-
-```
-
-#### Step 2: Zero-Overhead HTTP Rules Hosting
-
-To surface this list smoothly, we spun up a native, persistent Python HTTP server in the automation workspace bound to port `8000`. This maps the ruleset dynamically onto an internal URL:
-`http://192.168.1.132:8000/technitium_lancache_rules.txt`
-
-#### Step 3: Native Ingestion & Hot Reload
-
-We linked the local HTTP target directly into Technitium's UI engine via **Settings > Settings > Blocking > Allow / Block List URLs**.
-
-* **List Type Configuration:** Assigned as `Block List / Overrides`. This forces wildcard patterns matching targeted game delivery platforms to automatically force-steer clients onto the `192.168.1.132` high-speed storage array pathway.
-* **Internal Workers:** Technitium now manages network requests internally. A local sync engine checks the file bounds every 60 seconds; drops, overwrites, or physical filesystem edits clear system alerts automatically inside a 1-minute window without needing server container reboots.
-
-#### Step 4: Infrastructure Cleanup
-
-1. **Log Truncation:** We SSH'd into the container filesystem boundary and cleared the massive log blockages to drop file states safely back to baseline stability:
-```bash
-cd /var/log/technitium/dns/
-sudo truncate -s 0 2026-06-15.log
-
-```
-
-
-2. **Cron Purge:** Legacy individual update loops were permanently commented out or expunged from system task scheduling (`crontab -e`).
-
-### 🚀 Performance & Scaling Wins
-
-* **Zero API Throttling Risk:** Eliminated thousands of rapid-fire network transactions during high-velocity updates.
-* **Zone Database Optimization:** Technitium zone files remain clean, light, and hyper-stable.
-* **Wildcard Precision:** The `address=/domain/ip` wildcard architecture handles massive numbers of dynamic gaming subdomains automatically (e.g., matching any variation of `*.cache.steamcontent.com`), ensuring peak caching efficiency on our 2.5 Gbps backbone network.
-
-
