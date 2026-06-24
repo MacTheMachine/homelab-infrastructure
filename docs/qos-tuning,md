@@ -1,0 +1,17 @@
+Problem:
+- High jitter (~40 ms)
+- High latency under load (~70 ms)
+
+Solution:
+- Enabled Smart Queues on UniFi UCG-Max
+- Tuned to 420 Mbps down / 20 Mbps up
+
+Results:
+- Jitter reduced to ~5 ms
+- Stable gaming performance
+- No packet loss
+- Base latency ~30 ms
+
+Conclusion:
+- Bufferbloat was primary issue
+- SQM resolved instability
